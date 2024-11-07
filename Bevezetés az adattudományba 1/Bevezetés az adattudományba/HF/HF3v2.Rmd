@@ -1,0 +1,1208 @@
+---
+title: "HF3"
+author: "Tamás Pászthy"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup}
+# SETTING GLOBAL OPTIONS
+
+# Setting CRAN mirror for package installation
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Setting CRAN mirror for package installation
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Setting the output visibility
+knitr::opts_chunk$set(echo = TRUE)
+
+# Setting the width, height, and DPI for plots
+width <- 16
+height <- 8
+dpi <- 500
+
+knitr::opts_chunk$set(fig.width=width, fig.height=height, dpi = dpi)
+```
+
+## 1. feladat (HF3/1) (6 pont)
+
+Ebben a feladatban koronavírus járvánnyal kapcsolatos adatokat fogunk elemezni. Fő adatforrásunk a European Centre for Disease Prevention and Control adatbázisa, melyben a COVID-19-el kapcsolatos adatok [itt](https://www.ecdc.europa.eu/en/covid-19/data) érhetőek el. A legtöbb adatbázis országokra lebontva tartalmaz idősoros információt például az új esetek, elhalálozások, illetve beoltottak számáról/arányáról.
+
+Használt könyvtárak betöltése
+
+```{r label="Importing libraries", message=FALSE}
+# Importing the necessary libraries
+
+library(readr)      # For reading CSV
+library(dplyr)      # For handling DataFrames
+library(scales)     # For controlling axis labels format
+library(ggplot2)    # For plotting
+library(maps)       # For creating maps
+library(knitr)      # For rendering dataframes in a nice format
+library(kableExtra) # For rendering dataframes in a nice format)
+library(rpart)      # For decision tree
+library(rpart.plot) # For plotting decision tree
+library(caret)      # For model evaluation
+library(e1071)      # For model evaluation
+library(magrittr)   # For piping)
+library(formattable)# For formatting tables
+library(reshape2)   # For data manipulation
+library(scales)     # For scaling data
+library(dtw)        # For dynamic time warping
+library(DT)         # For interactive tables
+```
+
+Globális függvények deklarálása, amelyek a továbi kódban többször felhasználásra kerülnek.
+
+```{r label="Global variables"}
+
+# Function declaration for creating a table that looks nice when knitted
+nice_table <- function(df) {
+  # Ensuring that the input is a data frame
+  if (!is.data.frame(df)) {
+    stop("Input is not a dataframe.")
+  }
+  
+  # Numeric formatting with thousands separator
+  df <- df %>% mutate(across(where(is.numeric), ~ number(.x, big.mark = " ", accuracy = 1)))
+  
+  # Determine number of columns in the dataframe
+  num_cols <- ncol(df)
+  
+  # Use kable and kableExtra to format the DataFrame with alternating row colors and no line breaks for numbers
+  kable(head(df, 10), # Display only the first 10 rows
+        format = "html", # Output format
+        escape = F, # Do not escape HTML characters
+        align = 'c') %>% # Center alignment
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), # Adding styling options
+                  full_width = T,   # Full width ensures it stretches across the chunk width
+                  position = "center",  # Center the table
+                  font_size = 14) %>% # Setting font size
+    row_spec(0, bold = TRUE, color = "black") %>%  # Header row formatting
+    row_spec(seq(1, nrow(head(df)), 2), background = "#f9f9f9") %>%  # Alternating row colors
+    column_spec(1:num_cols, width = "auto", extra_css = "white-space: nowrap;") %>%  # Prevent line breaks in all columns
+    scroll_box(width = "100%", height = "auto")  # Enable horizontal scroll if table is too wide
+}
+
+
+# Custom theme to reuse in the plots
+plotting_theme <- function(size_adjustment) {
+  if (size_adjustment < -10 || size_adjustment > 10) {
+    stop("Size adjustment must be between -10 and 10")
+  }
+  
+  theme_minimal() +
+    theme(
+      axis.text.x = element_text(size = 14 + size_adjustment),  # X axis label size
+      axis.text.y = element_text(size = 14 + size_adjustment),  # Y axis label size
+      axis.title.x = element_text(size = 16 + size_adjustment), # X axis title size
+      axis.title.y = element_text(size = 16 + size_adjustment), # Y axis title size
+      legend.text = element_text(size = 12 + size_adjustment),  # Legend text size
+      legend.title = element_text(size = 14 + size_adjustment), # Legend title size
+      legend.position = "top",                                  # Legend position
+      legend.spacing.y = unit(0.1, 'cm'),                       # Space between legend items
+      legend.margin = margin(t = 0, b = 5),                     # Legend margins
+      plot.title = element_text(size = 16 + size_adjustment, face = "bold") # Plot title size and bold font (+ size_adjustment)
+    )
+}
+
+```
+
+### a) (2 pont)
+
+Az első feladatunk a napi új fertőzöttek és elhunytak számának elemzése. Az ehhez szükséges adatokat a daily cases oldalon található adattábla tartalmazza.
+
+#### a/1 Az adatok saját gépre való letöltése nélkül töltsük be egy daily_cases DataFramebe az oldalon található .csv állományt.
+
+```{r label="Reading CSV file from URL"}
+# Assigning the URL to a variable
+url <- "https://opendata.ecdc.europa.eu/covid19/nationalcasedeath_eueea_daily_ei/csv/data.csv"
+
+# Reading the CSV file from the URL
+daily_cases <- read.csv(url)
+
+# Displaying the DataFrame and checking on the datastructure
+nice_table(daily_cases)
+```
+
+#### a/2 Adatszűrés
+
+Most csak Magyarországgal, Ausztriával és Svédországgal szeretnénk foglalkozni, ezért szűrjük meg a DataFrameünket úgy, hogy csak ezek az országok maradjanak meg!
+
+```{r label="Filtering the DataFrame"}
+# Filtering the DataFrame to only contain Hungary, Austria and Sweden
+filtered_cases <- daily_cases %>% filter(countriesAndTerritories %in% c("Hungary", "Austria", "Sweden"))
+
+# Checking the unique values in the filtered DataFrame to see if the filtering was successful
+unique(filtered_cases$countriesAndTerritories)
+
+```
+
+#### a/3 Adatelhagyás
+
+Tartsuk meg csak a dateRep, cases, deaths, countriesAndTerritories, popData2020 oszlopainkat!
+
+```{r label="Keeping only the required columns"}
+# Keeping only the required columns
+filtered_cases <- filtered_cases %>%
+  select(dateRep, cases, deaths, countriesAndTerritories, popData2020)
+
+# Checking whether the process was successful
+colnames(filtered_cases)
+
+```
+
+#### a/4 Adatszerkezet módosítása
+
+Alakítsuk át date típusúvá a dateRep oszlopot! Szűrjük meg a DataFramet úgy, hogy csak 2021 júliusától vizsgáljuk az adatokat!
+
+```{r label="Transforming the dateRep column to Date and filtering the DataFrame"}
+# Transforming the type of the dateRep column to Date by assigning the very same column to itself with the as.Date() function
+filtered_cases$dateRep <- as.Date(filtered_cases$dateRep, format="%d/%m/%Y")
+
+# Filtering the DataFrame to only contain data from 2021-07-01 and onwards
+filtered_cases <- filtered_cases %>%
+  filter(dateRep >= as.Date("2021-07-01"))
+
+# Checking on the results
+nice_table(filtered_cases)
+min(filtered_cases$dateRep)
+```
+
+#### a/5 Ábrázolás
+
+Ábrázoljuk két külön vonaldiagramon a cases és deaths oszlopokat országonként színezve!
+
+```{r label="Creating the plotp"}
+# Function to create the plot
+plot_covid_data <- function(df, column, y_label) {
+  ggplot(df, aes(x = dateRep, y = !!sym(column), color = countriesAndTerritories)) +
+    geom_line() +
+    labs(
+      title = paste("Daily COVID-19", y_label, "by Country"),
+      x = "Date", 
+      y = paste("Number of", y_label)
+    ) +
+    scale_y_continuous(
+      labels = scales::label_number(), 
+    ) + 
+      plotting_theme(8)
+}
+
+# Example usage with the 'cases' column
+plot_covid_data(filtered_cases, "cases", "Cases")
+
+# Example usage with the 'deaths' column
+plot_covid_data(filtered_cases, "deaths", "Deaths")
+```
+
+### b) (2 pont)
+
+Második feladatunk a fertőzöttek korbeli eloszlásának vizsgálata. Az ehhez szükséges adatokat az [age-specific notification rate](https://www.ecdc.europa.eu/en/publications-data/covid-19-data-14-day-age-notification-rate-new-cases) oldalon található adattábla tartalmazza
+
+#### b/1 Adatbetöltés
+
+Az adatok saját gépre való letöltése nélkül töltsük be egy age_specific DataFramebe az oldalon található .csv állományt.
+
+```{r label="Reading the CSV file from the URL"}
+# Setting the URL
+age_specific_url <- "https://opendata.ecdc.europa.eu/covid19/agecasesnational/csv/data.csv"
+
+# Reading the CSV file directly from the URL
+age_specific <- read.csv(age_specific_url)
+
+# Checking on the results
+nice_table(age_specific)
+
+```
+
+#### b/2 Országszűrés
+
+Most csak Magyarországgal, Ausztriával és Svédországgal szeretnénk foglalkozni, ezért szűrjük meg a DataFrameünket úgy, hogy csak ezek az országok maradjanak meg!
+
+```{r label="Filtering the DataFrame by country"}
+# Filtering the DataFrame to only contain Hungary, Austria and Sweden
+age_specific <- age_specific %>% filter(country %in% c("Hungary", "Austria", "Sweden"))
+
+# Checking the unique values in the filtered DataFrame to see if the filtering was successful
+unique(age_specific$country)
+```
+
+#### b/3 Aggregálás
+Aggregáljuk az adatokat: Számoljuk ki, hogy mely országban összesen hány fertőzött volt az egyes korosztályokban. (Használjuk a dplyr group_by() függvényét!)
+
+```{r label="Aggregating the data by country and age", message=FALSE}
+
+# Aggregating the data by country and age to calculate total number of cases
+aggregated_data <- age_specific %>%   # Aggregating from age_specific
+  group_by(country, age_group) %>%    # Grouping by country and age_group
+  summarize(total_cases = sum(new_cases, na.rm = TRUE)) # Summarizing the total number of cases by country and age_group and removing NAs
+
+# Displaying the aggregated data
+nice_table(aggregated_data)
+```
+
+#### b/4 Ábrázolás
+
+Ábrázoljuk egymás mellé helyezett oszlopdiagrammokon a fertőzöttek számának eloszlását különböző korosztályokban. (Az y tengely ne normálalakban, hanem szimplán jelölje a számokat. Pl.: 2e5 helyett 200000)
+
+Megjegyzés: Ne feledkezzünk meg az ábra tengelyfeliratainak, címének beállításáról sem. Törekedjünk arra is, hogy a szövegek olvashatóak legyenek pl.: megfelelő legyen a betűméret is.
+
+```{r Bar plot for total cases by age group and country, fig.dpi=1000, fig.height=5, fig.width=12, message=FALSE}
+
+# Creating the bar plot
+ggplot(aggregated_data, aes(x = age_group, y = total_cases, fill = country)) +  # Defining datasources and aesthetics
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Distribution of COVID-19 Cases by Age Group and Country",  # Adding the title and axis labels
+       x = "Age Group",
+       y = "Total Number of Cases") +
+  scale_y_continuous(labels = scales::label_number()) +  # Ensuring that the y-axis labels are in a simple number format
+  plotting_theme(0)
+
+```
+
+### c) (2 pont)
+
+Az utolsó feladatban egy függvényt fogunk írni, melynek egyetlen bemenete egy statistic változó, ami meghatározza, hogy a térkép országait milyen változó szerint színezzük. A lehetséges változók a DataFrameünk oszlopai, ha egy nem létező oszlop nevét adjuk meg, akkor a függvény térjen vissza “Error: Unknown Statistics” szöveggel.
+
+#### c/1 Adatbetöltés
+
+Az adatokat [innen](https://math.bme.hu/~pinterj/BevAdat1/Adatok/CovidCasesPJ.csv){.uri} töltsük le a saját gépünkre az Adatok mappába, majd onnan töltsük be egy covid_cases DataFramebe! (Az adattábla a John Hopkins egyetem által a worldometers oldalon közzétett adatokat tartalmazza.)
+
+```{r Loading data from URL into a file, message=FALSE, warning=FALSE}
+# Setting the URL of the dataset to download from
+url <- "https://math.bme.hu/~pinterj/BevAdat1/Adatok/CovidCasesPJ.csv"
+
+# Setting the file path to save the downloaded file to
+file_path <- "../Adatok/CovidCasesPJ.csv"
+
+# Downloading the dataset into the file path
+download.file(url, destfile = file_path)
+
+# Loading the covid cases data from the local file
+covid_cases <- read.csv(file_path)
+
+# Checking on the datastructure
+nice_table(covid_cases)
+```
+#### c/2 Függvény definiálása
+
+Az alábbi feladatokat kell ellátni: - Az országok határaihoz telepítsük a maps packaget és tároljuk el egy world DataFramebe a map_data(“world”) táblázatot. - Definiáljuk a függvénykörnyezetet melynek egyetlen változója statistic. - A függvény ellenőrizze le, hogy létező statisztika-e a bemenet, ha nem, akkor térjen vissza az említett errorral. - Egyébként pedig illessze össze a covid_cases és world adattáblákat az ország mentén! (Figyeljünk arra, hogy a két táblázatban más az országot tartalmazó oszlop neve, nevesszük át a covid_cases DataFrame ‘Country’ oszlopát ‘region’-re.) - Az ábrát tároljuk el egy map lokális változóban. Végül a függvény térjen vissza a map ábrával.
+
+```{r Covid map plotting function definition}
+
+# Loading world map data
+world <- map_data("world")
+
+# Defining the function
+plot_covid_map <- function(statistic) {
+  # Check if the input exists in the covid_cases DataFrame
+  if (!statistic %in% colnames(covid_cases)) {
+    return("Error: Unknown Statistics")
+  }
+  
+  # Renaming the 'Country.' column in covid_cases to 'region' for joining, only if it hasn't been renamed yet
+  if ("Country." %in% colnames(covid_cases)) {
+    covid_cases <- covid_cases %>%
+      rename(region = Country.)
+  }
+  
+  # Merging the covid_cases and world datasets on the 'region' column
+  merged_data <- left_join(world, covid_cases, by = "region")
+  
+  # Creating the map
+  map <- ggplot(data = merged_data, mapping = aes(x = long, y = lat, group = group)) + # Defining the map aesthetics
+    coord_fixed(1.3) + # Fixing the aspect ratio
+    geom_polygon(aes_string(fill = statistic)) +  # Using aes_string for dynamic mapping
+    scale_fill_distiller(palette = "Oranges", direction = 1,  # Reverse color scale so that the more the serious the situation, the darker the color
+                         labels = scales::label_number(big.mark = " ")) +  # Apply thousand separator
+    ggtitle("World Covid-19 cases") +
+    theme(
+      axis.text = element_blank(),
+      axis.line = element_blank(),
+      axis.ticks = element_blank(),
+      panel.border = element_blank(),
+      panel.grid = element_blank(),
+      axis.title = element_blank(),
+      panel.background = element_rect(fill = "white"),
+      plot.title = element_text(hjust = 0.5, size = 16, face = "bold")
+    )
+  
+  # Returning the map object
+  return(map)
+}
+
+```
+#### c/3 Ábrázolás
+```{r Plotting process ,fig.height=6, fig.width=12, message=FALSE, warning=FALSE}
+# Plotting Cases
+plot_covid_map("Total.Cases")
+# Plotting deaths
+plot_covid_map("Total.Deaths")
+# Plotting exception
+plot_covid_map("NonExistentColumn")
+```
+
+## 2. feladat (HF3/2) (9 pont)
+
+Ebben a feladatban oktatási adattudománnyal foglalkozunk!
+
+### a) (1 pont)
+
+Töltsük le az Adatok mappába a Kaggle adattárházából [két portugál középiskola diákjainak adatait](https://www.kaggle.com/datasets/dipam7/student-grade-prediction), majd töltsük be a student-mat.csv fájlt egy school_data DataFramebe.
+
+```{r label="Loading the data from the file", message=FALSE}
+# Setting the file path
+file_path <- "../Adatok/student-mat.csv"
+
+# Loading the data into a DataFrame
+school_data <- read.csv(file_path)
+
+# Checking on the data structure
+nice_table(school_data)
+```
+
+<br> Az adatokon különböző gépitanulási algoritmusokat és módszereket próbálunk ki a következő feladatokban.
+
+### b) (1 pont)
+
+A prediktálandó célváltozónk a G3 oszlop, melyben a hallgatók végső jegyei szerepelnek. Készítsünk bináris osztályozási feladatot: Legyen a célváltozónk 1, ha a G3 oszlopban a hallgató végső jegye 10 fölött (\>=) van.
+
+```{r label="Modifying the G3 column to be binary", message=FALSE}
+# Modifying the G3 column to be binary: 1 if G3 >= 10, otherwise 0
+# Check if the G3 column has already been modified to binary
+if (!all(school_data$G3 %in% c(0, 1))) {
+  # If G3 is not binary, perform the transformation
+  school_data$G3 <- ifelse(school_data$G3 >= 10, 1, 0)
+} else {
+  message("G3 column is already binary, no changes made.")
+  }
+
+# Display the first few rows to verify the modification
+nice_table(school_data)
+```
+
+### c) (1 pont)
+
+Osszuk fel az adatokat véletlenszerűen 70% tanítóhalmazra és 30% teszthalmazra. Ne feledkezzünk meg random seed beállításáról sem! <i>(Mondjuk set.seed(20).)</i>
+
+```{r label="Splitting the data into training and test sets", message=FALSE}
+# Setting the seed for reproducibility
+seed <- 20
+set.seed(seed)
+
+# Createing a variable to split the data (70% training, 30% test)
+# First argument: number of classes (2)
+# Second argument: number of rows in the dataset
+# Third argument: replace = TRUE (sampling with replacement)
+# Fourth argument: prob = c(0.7, 0.3) (probability of each class)
+ind <- sample(2, nrow(school_data), replace = TRUE, prob = c(0.7, 0.3))
+
+# Compose the training set (rows where ind == 1)
+# Empty space after comma means all columns
+school_data_train <- school_data[ind == 1, ] # Storing all the data from the original dataset
+
+# Compose the test set (rows where ind == 2)
+school_data_test <- school_data[ind == 2, ]
+
+# Checking on the first few rows of both sets
+# nice_table(school_data_train)
+# nice_table(school_data_test)
+```
+
+### d) (3 pont)
+
+Tanítsunk döntési fa modellt az adatokoon és értékeljük is ki a modell teljesítményét a teszthalmazon!
+
+#### d/1 Modellépítés
+
+Modell építéséhez használjuk az rpart libraryt!
+
+```{r label="Building the decision tree model", message=FALSE}
+# Building the decision tree model on the training data
+# G3 is the target variable
+# All other columns are the predictors
+# Syntax: rpart(target_variable ~ predicotrs, data = training_data, method = "class")
+decision_tree_model <- rpart(G3 ~ ., data = school_data_train, method = "class")
+
+# Summary of the decision tree model
+#summary(decision_tree_model)
+```
+
+#### d/2 Döntési fa rajzolása
+
+Rajzoltassuk is ki a döntési fa modelljét! (rpart.plot)
+
+<p>Értelmezzük is pár mondatban a döntési fát a rajz alapján! (pl.: Mi mentén vág a fa? Milyen címkét kapnak az egyes levelek? Hány százalékban találja el ott a címkéket?)</p>
+
+```{r label="Plotting the decision tree model"}
+# Plot the decision tree model
+rpart.plot(decision_tree_model, 
+           type = 2,               # Node representation
+           extra = 104,            # Show both count and percentage in the leaves
+           under = TRUE,           # Display the label under the box
+           box.palette = "RdYlGn", # Add colors to the boxes based on class probability
+           shadow.col = "gray",    # Add shadows to the boxes for better visibility
+           yesno = 2)              # Highlight the yes/no answers in the tree when splitting
+```
+
+<h2>Döntési fa elemzés összegzése</h2>
+
+<p>A döntési fa első lépésben a <strong>G2 változó</strong> mentén vág. A G2 változó a tanulmány második periódusának indikátora, amely 0 és 20 közötti értéket vehet fel.</p>
+
+<h3>Első elágazás: G2 ≥ 10</h3>
+
+<p>Ha a <strong>G2 értéke legalább 10</strong>, a fa úgy osztja meg az adathalmazt, hogy a rekordok 62%-a erre az ágra kerül. A modell itt a végső jegyet (G3) 1-esnek (<em>≥ 10</em>) címkézi <strong>97%-os pontossággal</strong>. Mivel ezen a levélen az 1-es címkék zömét jól prediktálja a modell, itt érdemes terminálni. Ez arra utal, hogy a <strong>G2 prediktor</strong> jelentős szerepet játszik a G3 megjóslásában az esetek közel 2/3-ában.</p>
+
+<h4>Másik ág: G2 \< 10</h4>
+
+<p>Ha a <strong>G2 kisebb, mint 10</strong>, akkor az adatok 38%-a egy másik ágra kerül. Itt a modell 0 címkét ad a rekordoknak <strong>80%-os pontossággal</strong>. Azonban ezen a ponton további finomítás szükséges, ezért a fa ezen a csomóponton tovább osztja az adatokat.</p>
+
+<h3>További vágás: G2 \< 8</h3>
+
+<p>Amennyiben a <strong>G2 kisebb, mint 8</strong>, a modell az adatok 14%-át sorolja be egy ágra, ahol 100%-ban helyesen címkézi a rekordokat 0-nak. Itt egyértelműen szükséges terminálni, mivel minden megfigyelést helyesen osztályoz a modell.</p>
+
+<h4>További vizsgálat: 8 ≤ G2 \< 10</h4>
+
+<p>Amennyiben <strong>G2 értéke 8 és 10 között</strong> van, további vizsgálatra van szükség. A modell ekkor már nem csak a második tanulmányi periódus érdemjegyéből következtet, hanem más változókat is figyelembe vesz:</p>
+
+<ul>
+
+<li><strong>Életkor:</strong> Ha a diák 19 éves vagy idősebb, az adatok 4%-át ezen az ágon sorolja be, és ezeket 100%-ban helyesen címkézi 0-nak. Ez a csomópont terminál.</li>
+
+<li><strong>Az anya iskolai végzettsége (Medu):</strong> Ha a diák édesanyjának iskolai végzettsége kevesebb mint középiskolai szintű (Medu \< 2), az adatok 3%-a ezen az ágon helyezkedik el, amelyeket a modell 78%-os pontossággal 1-esnek címkéz. Itt a fa terminál.</li>
+
+<li><strong>Tanulásra fordított idő (studytime):</strong> Ha a diák heti tanulási ideje kevesebb, mint 2-5 óra, akkor az adatok 4%-a erre az ágra kerül, ahol a modell 60%-os pontossággal címkézi a rekordokat 1-esnek.</li>
+
+</ul>
+
+<p>Ha a diák több mint 5 órát tanul hetente, az adatok 12%-a egy másik ágra kerül, ahol a modell 79%-os pontossággal címkézi a rekordokat 0-nak. Ezen a ponton a modell terminál</p>
+
+#### d/3 Predikció készítése
+
+Készítsünk predikciókat is a modellel majd írassuk ki a teszthalmaz tévesztési mátrixát! <i>(caret csomag confusionMatrix, factor készítéshez: e1071 csomag as.factor függvénye)</i>
+<p>Figyelj rá, hogy az 1-es classt tekintse a tévesztési mátrix a pozitív osztálynak!</p>
+
+```{r label="Model evaluation on the test set"}
+# Predicton of the G3 outcome on the test set using the decision tree model
+predictions <- predict(decision_tree_model, school_data_test, type = "class")
+
+# Converting the actual and predicted values to factors, ensuring "1" is the positive class
+actual <- as.factor(school_data_test$G3) # Convert the actual values to factors
+predicted <- as.factor(predictions) # Convert the predicted values to factors
+
+# Ensuring that both actual and predicted values have the same levels (0 and 1)
+levels(actual) <- c(0, 1) # Set the levels of the actual values
+levels(predicted) <- c(0, 1) # Set the levels of the predicted values
+
+# Creating the confusion matrix, specifying that "1" is the positive class
+confusion <- confusionMatrix(predicted, actual, positive = "1")
+
+# Printing the confusion matrix and the performance metrics
+print(confusion)
+```
+#### d/4 Értelmezés
+<b>Értelmezd pár mondatban az eredményeket!</b>
+
+<h5>Tévesztési mátrix (Confusion Matrix):</h5>
+
+<pre>
+          Reference
+Prediction  0  1
+         0 36  3
+         1  9 83
+</pre>
+
+<h5>Statisztikák magyarázata:</h5>
+
+<ol>
+
+<li>
+
+<strong>Accuracy (Pontosság):</strong>
+
+<p>A modell pontossága: <strong>90.84%</strong>, ami azt jelenti, hogy az összes predikció 90.84%-a helyes volt.</p>
+
+</li>
+
+<li>
+
+<strong>95% CI (Konfidencia intervallum):</strong>
+
+<p>A pontosság 95%-os konfidencia intervalluma: <strong>(84.55%, 95.18%)</strong>. Ez azt jelenti, hogy 95%-os valószínűséggel a modell pontossága ezen az intervallumon belül van.</p>
+
+</li>
+
+<li>
+
+<strong>No Information Rate (NIR):</strong>
+
+<p>A leggyakoribb osztály előfordulási aránya az adatokban: <strong>65.65%</strong>.</p>
+
+</li>
+
+<li>
+
+<strong>P-Value [Acc \> NIR]:</strong>
+
+<p>A p-érték azt mutatja, hogy a modell pontossága statisztikailag szignifikánsan jobb, mint a véletlenszerű osztályozás: <strong>1.874e-11</strong>.</p>
+
+</li>
+
+<li>
+
+<strong>Kappa:</strong>
+
+<p>A Kappa statisztika: <strong>0.7902</strong>, ami erős egyezést mutat a valóság és a modell predikciói között.</p>
+
+</li>
+
+<li>
+
+<strong>McNemar's Test P-Value:</strong>
+
+<p>A p-érték <strong>0.1489</strong>, ami nem mutat szignifikáns különbséget a kétféle hiba között (amikor tévesen 0-s vagy 1-es osztályt prediktál a modell).</p>
+
+</li>
+
+<li>
+
+<strong>Sensitivity:</strong>
+
+<p>A Sensitivity: <strong>96.51%</strong>, ami azt mutatja, hogy a modell nagyon jól felismeri a pozitív osztályt (1-es osztály).</p>
+
+</li>
+
+<li>
+
+<strong>Specificity:</strong>
+
+<p>Ez a mutató: <strong>80%</strong>, ami azt mutatja, hogy a modell jól felismeri a negatív osztályt (0-s osztály).</p>
+
+</li>
+
+<li>
+
+<strong>Pos Pred Value (Pozitív Prediktív Érték):</strong>
+
+<p>A pozitív prediktív érték: <strong>90.22%</strong>, ami azt jelenti, hogy a pozitívnak prediktált esetek 90.22%-a helyes.</p>
+
+</li>
+
+<li>
+
+<strong>Neg Pred Value (Negatív Prediktív Érték):</strong>
+
+<p>A negatív prediktív érték: <strong>92.31%</strong>, ami azt jelenti, hogy a negatívnak prediktált esetek 92.31%-a helyes.</p>
+
+</li>
+
+<li>
+
+<strong>Prevalence:</strong>
+
+<p>A pozitív osztály előfordulási gyakorisága az adatokban: <strong>65.65%</strong>.</p>
+
+</li>
+
+<li>
+
+<strong>Detection Rate (Észlelési Arány):</strong>
+
+<p>A pozitív osztály felismerési aránya: <strong>63.36%</strong>.</p>
+
+</li>
+
+<li>
+
+<strong>Detection Prevalence (Észlelési Prevalencia):</strong>
+
+<p>A modell az esetek <strong>70.23%-ánál</strong> prediktált pozitív osztályt.</p>
+
+</li>
+
+<li>
+
+<strong>Balanced Accuracy (Kiegyensúlyozott Pontosság):</strong>
+
+<p>A kiegyensúlyozott pontosság: <strong>88.26%</strong>.</p>
+
+</li>
+
+</ol>
+
+#### d/5 Irassuk a modell szerinti legfontosabb változókat!
+
+Ehhez segítségül szolgálnak a megadott kódok. Mit tapasztalsz? Miért dominál ennyire két változó?
+
+```{r label="Calculating the variable importances"}
+# Calculating the importance of each variable in the decision tree model
+importances <- varImp(decision_tree_model)
+
+# Sorting variables by importance
+# Ignoring nice_table function, because I want to check on each variable's importance
+importances %>%
+  arrange(desc(Overall))
+```
+
+### e) (2 pont)
+
+Láthattuk a b) feladatrész megoldása közben, hogy van két oszlop, mely nagyon dominálja a modellünket. Ez a két oszlop csak azután áll rendelkezésünkre, miután már a diákok eltöltöttek két időszakot is a középiskolában. Mondhatni nem nagy kunszt a végső átlagot prediktálni úgy, hogy már tanulmányaik 2/3-át befejezték a hallgatók. Ahhoz, hogy gyakorlatban is használható modellt tudjunk felépíteni célszerű eldobni azokat az oszlopokat melyek nem állnak rendelkezésre a felvételi előtti időszakban. Így a hallgatók már kezdetben képet kaphatnak arról, hogy milyen esélyeik vannak a gépi tanulási modell szerint a jó középiskolai szereplésre. 
+
+#### e/1 Oszlopok eldobása
+Dobjuk el a G1, G2, failures és absences oszlopokat!
+
+```{r label="Dropping the G1, G2, failures, and absences columns"}
+# Remove G1, G2, failures, and absences columns
+school_data_train_reduced <- school_data_train %>%
+  select(-G1, -G2, -failures, -absences)
+```
+#### e/2 Modellépítés
+Hajtsuk végre az előző feladatrészek pontjait.
+Döntési fa modell elkészítése.
+```{r}
+# Build a new decision tree model without the dropped columns
+decision_tree_model_reduced <- rpart(G3 ~ ., data = school_data_train_reduced, method = "class")
+
+# summary(decision_tree_model_reduced)
+```
+#### e/3 Döntési fa rajzolása
+```{r label="Model evaluation on the training set with reduced columns"}
+rpart.plot(decision_tree_model_reduced, 
+           type = 2,               # Node representation
+           extra = 104,            # Show both count and percentage in the leaves
+           under = TRUE,           # Display the label under the box
+           box.palette = "RdYlGn", # Add colors to the boxes based on class probability
+           shadow.col = "gray",    # Add shadows to the boxes for better visibility
+           yesno = 2)              # Highlight the yes/no answers in the tree when splitting
+```
+
+#### e/4 Predikciók készítése 
+Predikciók és a CM valamint a statisztikák kiírása
+```{r label="Model evaluation, CM and statistics with reduced columns"}
+# Predictions of the G3 outcome using the reduced decision tree model
+predictions_reduced <- predict(decision_tree_model_reduced, school_data_test, type = "class")
+
+# Convert the actual and predicted values to factors, ensuring "1" is the positive class
+actual <- as.factor(school_data_test$G3) # Convert the actual values to factors
+predicted <- as.factor(predictions_reduced) # Convert the predicted values to factors
+
+# Ensure that both actual and predicted values have the same levels (0 and 1)
+levels(actual) <- c(0, 1) # Set the levels of the actual values
+levels(predicted) <- c(0, 1) # Set the levels of the predicted values
+
+# Step 3: Create the confusion matrix, specifying that "1" is the positive class
+confusion <- confusionMatrix(predicted, actual, positive = "1")
+
+# Step 4: Print the confusion matrix and the performance metrics
+print(confusion)
+```
+
+#### e/5 Legfontosabb változók kiírása
+
+```{r label="Variable importances with reduced columns"}
+# Calculateing the importance of each variable in the REDUCED decision tree model
+importances_reduced <- varImp(decision_tree_model_reduced)
+
+# Sorting variables by importance
+importances_reduced %>%
+  arrange(desc(Overall))
+```
+
+#### e/6 Kiértékelés
+Értékeljük pár mondatban az eredményeket! - Most milyen pontos a modellünk? - Így mi a legfontosabb változó? - Stb. 
+
+**Válasz:**
+
+<h5>1.  Modell pontossága (Accuracy):</h5>
+
+    <ul>
+
+    <li><strong>Mostani modell pontossága:</strong> 61.07%</li>
+
+    <li><strong>Előző modell pontossága:</strong> 90.84%</li>
+
+    </ul>
+
+    <p>Az új modell teljesítménye jelentősen romlott, hiszen a pontosság több mint 30%-kal csökkent.</p>
+
+<h5>2.  Legfontosabb változók:</h5>
+
+    <p>A legfontosabb változók most a diákok alkohol fogyasztásával kapcsolatosak: <strong>Walc</strong> (hétvégi alkohol fogyasztás) és <strong>Dalc</strong> (napi alkohol fogyasztás). Az előző modellben a G2 és G1 dominált, ami közvetlenül befolyásolta a diákok eredményeit, míg most az életmódhoz kapcsolódó változók kerültek előtérbe.</p>
+
+<h5>3.  További statisztikák:</h5>
+
+    <ul>
+
+    <li><strong>Sensitivity:</strong> 77.91% - A modell közepesen ismeri fel jól a pozitív osztályba tartozó diákokat (azokat, akiknek a végső eredménye 10 fölött van).</li>
+
+    <li><strong>Specificity:</strong> 28.89% - A modell kevésbé hatékony a negatív osztályba tartozó diákok (végső eredmény 10 alatt) felismerésében.</li>
+
+    </ul>
+
+    <p>Ez azt jelzi, hogy a modell inkább hajlamos pozitívnak (1-es osztály) besorolni a diákokat, és sok esetben tévesen pozitívként osztályozza őket.</p>
+
+<h5>Összegzés:</h5>
+
+<p>Az új modell jóval kevésbé pontos, mert a tanulmányok előző időszakából származó közvetlen információkat elvetettük (G1, G2). Most inkább olyan életmódbeli tényezők dominálnak, mint az alkohol fogyasztás és a családi támogatás, de ezek nem olyan erős prediktorok, mint a tanulmányi eredmények.</p>
+
+<p>Az új modell inkább hajlamos pozitív osztályokat besorolni (Sensitivity jó), de jelentősen romlik a negatív osztályok felismerésében (Specificity alacsony).</p>
+
+#### e/7 Modell teljesítményének javítása
+Láthatjuk, hogy jelentősen romlott a modellünk teljesítménye. Próbáljunk meg javítani rajta!
+
+-   Készítsünk két külön DataFramet, egyet a Gabriel Pereira iskola tanulóinak, egy másikat a Mousinho da Silveira iskola tanulóinak.
+-   Osszuk fel a dataframeket 1-1 tanító- és teszthalmazra.
+-   Tanítsunk külön modelleket a két iskolában! És készítsünk külön predikciókat!
+-   Fúzzük össze a két predikciós vektort, és a teszt címkék vektorait. Majd irassunk ki egy tévesztési mátrixot, ami összevontan értékeli ki a két modell teljesítményét! Írd le tapasztalataidat! Sikerült-e javítani a modell teljesítményén?
+
+##### e/7.1 Két DataFrame létrehozása
+Készítsünk két külön DataFramet, egyet a Gabriel Pereira iskola tanulóinak, egy másikat a Mousinho da Silveira iskola tanulóinak.
+
+```{r label="Splitting the dataset by school"}
+# Splitting the dataset reagarind the school
+gp_data <- school_data %>% filter(school == "GP")
+ms_data <- school_data %>% filter(school == "MS")
+
+# Columns to be dropped
+drop_columns <- c("G1", "G2", "failures", "absences")
+
+# Dropping columns
+gp_data <- gp_data %>% select(-all_of(drop_columns))
+ms_data <- ms_data %>% select(-all_of(drop_columns))
+
+```
+
+##### e/7.2 Egy-egy tanító- és teszthalmazra bontás
+Osszuk fel a dataframeket 1-1 tanító- és teszthalmazra.
+
+```{r label="Splitting the data into training and test sets by school"}
+
+# Setting random seed
+set.seed(seed)
+
+# GP train and test set
+ind_gp <- sample(2, nrow(gp_data), replace = TRUE, prob = c(0.7, 0.3))
+gp_train <- gp_data[ind_gp == 1, ]
+gp_test <- gp_data[ind_gp == 2, ]
+
+# Setting random seed
+set.seed(seed)
+
+# MS train and test set
+ind_ms <- sample(2, nrow(ms_data), replace = TRUE, prob = c(0.7, 0.3))
+ms_train <- ms_data[ind_ms == 1, ]
+ms_test <- ms_data[ind_ms == 2, ]
+```
+
+##### e/7.3 Modellek tanítása
+Tanítsunk külön modelleket a két iskolában!
+
+```{r label="Building the decision tree models by school"}
+# GP Decision Tree model
+decision_tree_gp <- rpart(G3 ~ ., data = gp_train, method = "class")
+
+# MS Decision Tree model
+decision_tree_ms <- rpart(G3 ~ ., data = ms_train, method = "class")
+
+```
+##### e/7.4 Predikciók készítése
+És készítsünk külön predikciókat!
+```{r label="Model evaluation on the test set by school"}
+
+# GP Predictions
+gp_predictions <- predict(decision_tree_gp, gp_test, type = "class")
+
+# MS Predictions
+ms_predictions <- predict(decision_tree_ms, ms_test, type = "class")
+```
+
+##### e/7.5 Összefűzés
+Fúzzük össze a két predikciós vektort, és a teszt címkék vektorait.
+```{r label="Combining the predictions and actual values"}
+# Combining the and MS and GP Predictions, and MS and GP Actual values
+combined_predictions <- c(gp_predictions, ms_predictions)
+combined_actual <- c(gp_test$G3, ms_test$G3)
+
+# Convert thet data to factors
+combined_predictions <- as.factor(combined_predictions)
+combined_actual <- as.factor(combined_actual)
+
+# Ensuring that both set of values have the same levels
+levels(combined_predictions) <- c(0, 1)
+levels(combined_actual) <- c(0, 1)
+```
+
+##### e/7.6 CM készítése
+Majd irassunk ki egy tévesztési mátrixot, ami összevontan értékeli ki a két modell teljesítményét!
+
+```{r label="Model evaluation, CM and statistics by school"}
+# Combined CM
+confusion_combined <- confusionMatrix(combined_predictions, combined_actual, positive = "1")
+
+confusion_combined
+```
+
+##### e/7.7 Értékelés
+Írd le tapasztalataidat! Sikerült-e javítani a modell teljesítményén?
+```{r label="Comparing the models"}
+# Evaluation of the data by a visual approach
+
+# Create a data frame from the HTML table
+comparison_df <- data.frame(
+  Metrika = c("Accuracy", 
+             "Sensitivity", 
+             "Specificity", 
+             "Pos Pred Value", 
+             "Neg Pred Value"),
+  
+  Csökkentett_Változók_Modell = c("61.07", 
+                                  "77.91", 
+                                  "28.89", 
+                                  "67.68", 
+                                  "40.63"),
+  
+  Iskolákra_Lebontott_Modell = c("60.16", 
+                                 "70.59", 
+                                 "39.53", 
+                                 "69.77", 
+                                 "40.48")
+)
+
+# Applying heatmap coloring
+formattable(comparison_df, list(
+  Csökkentett_Változók_Modell = color_tile("red", "green"),
+  Iskolákra_Lebontott_Modell = color_tile("red", "green")
+))
+```
+
+A G1, G2, failures és absences oszlopok elhagyásával a modell teljesítménye jelentősen romlott, és a specifikusabb prediktorok, mint az alkohol fogyasztás vagy az életmódbeli tényezők, kevésbé alkalmasak a tanulmányi eredmények előrejelzésére. A két külön iskola modelljeinek összefűzése sem hozott javulást.
+
+### f) (1 pont)
+
+Maradjunk a c) pont utolsó verziójánál! Próbáljuk ki, hogyan teljesít a naív Bayes osztályozó az adatokon! (Használjuk az e1071 csomag naiveBayes függvényét!)
+
+```{r label="Building the Naive Bayes model and evaluating its performance"}
+# Building the Naive Bayes model
+naive_bayes_model <- naiveBayes(G3 ~ ., data = school_data_train)
+
+# Predictions using NBM
+nb_predictions <- predict(naive_bayes_model, school_data_test)
+
+# Convert the actual and predicted values to factors
+actual <- as.factor(school_data_test$G3)
+predicted <- as.factor(nb_predictions)
+
+# Making sure that both actual and predicted values have the same levels
+levels(actual) <- c(0, 1)
+levels(predicted) <- c(0, 1)
+
+# Creating the confusion matrix
+nb_confusion <- confusionMatrix(predicted, actual, positive = "1")
+
+# Eredmények kiírása
+print(nb_confusion)
+```
+
+**Válasz:** A NBM nem teljesít jobban, mint ugyanerre az adathalmazra a döntési fa.
+
+## 3. feladat (HF3/3) (5 pont)
+
+Az utolsó feladatban különböző cégek részvényeinek árfolyamait fogjuk elemezni. [Ebben a mappában](https://math.bme.hu/~pinterj/BevAdat1/Adatok/Stock/) a Facebook és a Twitter részvényárfolyamának idősora található egészen 2020 áprilisáig.
+
+Az alábbiak a feladatok:
+
+<ol type="a">
+
+<li>Töltsük be az adatokat különböző DataFramekbe a saját gépünkre való letöltés nélkül!</li>
+
+<li>Szűrjük meg a DataFrameinket, vizsgáljuk az adatainkat 2017 áprilisától.</li>
+
+<li>Nézzünk utána és fogalmazzuk meg saját szavainkkal, hogy mit jelentenek az open, close, low, high értékek!</li>
+
+<li>Alakítsuk át a DataFrameinket “Tall” formájúvá. (Ehhez használjuk a reshape2 csomag melt függvényét. Tall DataFramek alatt olyan táblázatokat értünk, melynek általában 3 oszlopa van, és mindegyik sor egyetlenegy változó értékét tartalmazza az adott helyen, a plusz oszlop pedig beazonosítja, hogy melyik változóról is van szó.)</li>
+
+<li>Mind a két táblázatnál ábrázoljuk a low, high, open és close idősorokat különböző színekkel. (Figyeljünk a tengelyfeliratokra, ábra címére, és az olvasható betűméretekre, ábra méretére stb.)</li>
+
+<li>Ábrázoljuk közös vonaldiagramon a Facebook és Twitter 2017-es, 2018-as és 2019-es open részvényárfolyamait. (Ötlet: Készítsünk 3-3 DataFramet az adatokból. Jelöljük egy oszlopban, hogy milyen típusú adatról van szó pl.: Facebook 2018, majd illesszük össze a 6 DataFramet, a dátumból pedig kérjük le dátumként csak a nap és hónap értékeket.)</li>
+
+<li>Időbeli változások vizsgálatával szeretnénk foglalkozni, mind a 6 idősort min-max skálázzuk! (Használjuk a scales library rescale függvényét!)</li>
+
+<li>Számoljuk ki és ábrázoljuk egy táblázatban a normalizált idősorok páronkénti DTW távolságát! (Használjuk a dtw csomag dtw függvényét! Készítsünk DataFramet, a sorok és oszlopok nevei is legyenek a megfelelő idősorok nevei, a cellákban pedig a DTW távolságuk szerepeljen. Használj for ciklust! Tárold el a DataFrameket egy listában.)</li>
+
+<li>Mit tapasztalsz? Hasonlítanak-e a különböző években a cégek idősorai? Foglald össze tapasztalataidat 1-2 mondatban.</li>
+
+</ol>
+
+### a) Adatok betöltése
+Töltsük be az adatokat különböző DataFramekbe a saját gépünkre való letöltés nélkül!
+
+```{r label="Loading the data"}
+# Setting links
+facebook_url <- "https://math.bme.hu/~pinterj/BevAdat1/Adatok/Stock/Facebook.csv"
+twitter_url <- "https://math.bme.hu/~pinterj/BevAdat1/Adatok/Stock/Twitter.csv"
+
+# Loading data directly from the URLs
+facebook_data <- read.csv(facebook_url)
+twitter_data <- read.csv(twitter_url)
+
+# Checking on the data structure
+# Structure of facebook_data
+str(facebook_data)
+# Structure of twitter_data
+str(twitter_data)
+
+# Printing the table
+# nice_table(facebook_data)
+```
+
+### b) Adatok szűrése
+Szűrjük meg a DataFrameinket, vizsgáljuk az adatainkat 2017 áprilisától.<br>
+Az adatok megfelelő rendezéséhez szükséges a dátum oszlopot megfelelő formátumra alakítani.
+
+```{r label="Data filtering"}
+# Converting the Date column to Date format
+facebook_data$Date <- as.Date(facebook_data$Date, format = "%Y-%m-%d")
+twitter_data$Date <- as.Date(twitter_data$Date, format = "%Y-%m-%d")
+
+# Setting the start date
+start_date <- as.Date("2017-04-01")
+
+# Data filtering process
+facebook_filtered <- facebook_data %>% filter(Date >= start_date)
+twitter_filtered <- twitter_data %>% filter(Date >= start_date)
+```
+
+### c) Fogalommagyarázat
+
+Nézzünk utána és fogalmazzuk meg saját szavainkkal, hogy mit jelentenek az open, close, low, high értékek!
+
+<ul>
+
+<li>
+
+<strong>Open</strong>:
+
+<p>A napi első árfolyam, amin a részvényt az adott tőzsdenap elején megvásárolhatták. Ez az ár jelzi, hogy a nap elején mekkora volt a piaci érdeklődés és az első tranzakció ára.</p>
+
+</li>
+
+<li>
+
+<strong>Close</strong>:
+
+<p>A napi utolsó árfolyam, amin a részvényt a tőzsdenap végén eladták vagy megvásárolták. Ez az ár egy fontos mutató, mivel gyakran jelzi a napi záró állapotot és a befektetők reakcióit a piaci eseményekre.</p>
+
+</li>
+
+<li>
+
+<strong>Low</strong>:
+
+<p>Az adott napon elért legalacsonyabb árfolyam. Ez azt jelzi, hogy a nap során mennyire csökkent a részvény ára, és általában az az ár, amin a legkevésbé volt kereslet a részvény iránt aznap.</p>
+
+</li>
+
+<li>
+
+<strong>High</strong>:
+
+<p>Az adott napon elért legmagasabb árfolyam. Ez mutatja, hogy mennyire növekedett a részvény ára az adott napon, és ez az ár az, amit a legnagyobb kereslet idején értek el.</p>
+
+</li>
+
+</ul>
+
+### d) DF -\> Tall átalakítás
+
+Alakítsuk át a DataFrameinket “Tall” formájúvá. (Ehhez használjuk a reshape2 csomag melt függvényét. Tall DataFramek alatt olyan táblázatokat értünk melynek általában 3 oszlopa van, és mindegyik sor egyetlenegy változó értékét tartalmazza az adott helyen, a plusz oszlop pedig beazonosítja, hogy melyik változóról is van szó.)
+
+```{r label="Tall DataFrame format conversion"}
+# Function to evaluate repeating code
+tall_format_conversion <- function(data) {
+  melt(data, id.vars = "Date", 
+       measure.vars = c("Open", "High", "Low", "Close", "Adj.Close", "Volume"),
+       variable.name = "Metric", value.name = "Value")
+}
+
+# Transforming tha datasets to tall format
+facebook_tall <- tall_format_conversion(facebook_filtered)
+twitter_tall <- tall_format_conversion(twitter_filtered)
+```
+
+### e) Ábrázolás
+
+Mind a két táblázatnál ábrázoljuk a low, high, open és close idősorokat különböző színekkel. (Figyeljünk a tengelyfeliratokra, ábra címére, és az olvasható betűméretekre, ábra méretére stb.)
+
+```{r message=FALSE, warning=FALSE, label="Plotting"}
+# Function to plot the stock data
+plot_stock_data <- function(data, title) {
+  ggplot(data %>% filter(Metric %in% c("Low", "High", "Open", "Close")),  # Filtering the data
+         aes(x = Date, y = Value, color = Metric)) +                      # Setting the axes and color
+    geom_line(size = 1) +                                                 # Width of line
+    labs(title = title, x = "Date", y = "Value") +                        # Labels for the plot and title
+    plotting_theme(2) +                                                   # Applying the custom theme
+    scale_color_manual(values =                                           # Setting custom colors
+                         c("blue", 
+                           "darkgreen", 
+                           "red", 
+                           "purple"))
+}
+
+# Plotting
+plot_stock_data(facebook_tall, "Facebook Stock Prices")
+plot_stock_data(twitter_tall, "Twitter Stock Prices")
+```
+<br>
+Szöveges megjegyzés: Az adatok hasonlósága miatt nehezen megkülönböztethetőek a görbék az ábrákon.
+
+
+### f) Ábrázolás II
+
+Ábrázoljuk közös vonaldiagramon a facebook és twitter 2017-es, 2018-as és 2019-es open részvényárfolyamait. (Ötlet: Készítsünk 3-3 DataFramet az adatokból. Jelöljük egy oszlopban, hogy milyen típusú adatról van szó pl.: Facebook 2018, majd illesszük össze a 6 DataFramet, a dátumból pedig kérjük le dátumként csak a nap és hónap értékeket.)
+
+#### f/1 Előkészítés
+Készítsünk 3-3 DataFramet az adatokból. Jelöljük egy oszlopban, hogy milyen típusú adatról van szó pl.: Facebook 2018, majd illesszük össze a 6 DataFramet, a dátumból pedig kérjük le dátumként csak a nap és hónap értékeket.
+```{r label="Data preparation"}
+# Defining a function to filter the data by year and label it
+filter_year_and_label <- function(data, company_name, year) {
+  data %>%
+    filter(format(Date, "%Y") == as.character(year)) %>%
+    select(Date, Open) %>%
+    mutate(Type = paste(company_name, year)) # Adding a label to the data
+}
+
+# Filtering the data and creating the DataFrames
+facebook_2017 <- filter_year_and_label(facebook_filtered, "Facebook", 2017)
+facebook_2018 <- filter_year_and_label(facebook_filtered, "Facebook", 2018)
+facebook_2019 <- filter_year_and_label(facebook_filtered, "Facebook", 2019)
+
+twitter_2017 <- filter_year_and_label(twitter_filtered, "Twitter", 2017)
+twitter_2018 <- filter_year_and_label(twitter_filtered, "Twitter", 2018)
+twitter_2019 <- filter_year_and_label(twitter_filtered, "Twitter", 2019)
+
+# Combining the DataFrames
+combined_data <- bind_rows(facebook_2017, facebook_2018, facebook_2019, 
+                           twitter_2017, twitter_2018, twitter_2019)
+
+# Formatting the Date column
+combined_data <- combined_data %>% mutate(Date = format(Date, "%m-%d"))
+
+# Checking on the results
+nice_table(combined_data)
+```
+
+#### f/2 Ábrázolás
+Ábrázoljuk közös vonaldiagramon a facebook és twitter 2017-es, 2018-as és 2019-es open részvényárfolyamait.
+```{r message=FALSE, warning=FALSE, label="Plotting the combined stock data"}
+
+ggplot(combined_data, aes(x = as.Date(paste0("2020-", Date), "%Y-%m-%d"), y = Open, color = Type, group = Type)) +
+  geom_line(size = 1) +  # Line width
+  labs(title = "Facebook and Twitter Open Stock Prices (2017-2019)", 
+       x = "Month", 
+       y = "Open Price") +
+  plotting_theme(2) +
+  theme(
+    legend.position = "right") +
+  scale_color_manual(values = c("Facebook 2017" = "#ADD8E6",
+                                "Facebook 2018" = "#4682B4",
+                                "Facebook 2019" = "#00008B",
+                                "Twitter 2017" = "#FFC0CB",
+                                "Twitter 2018" = "#FF6347",
+                                "Twitter 2019" = "#8B0000")) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%m")
+
+
+```
+
+### g) DTW előkészítse
+
+Időbeli változások vizsgálatával szeretnénk foglalkozni
+
+<p><strong>Skálázás</strong></p>
+
+<p>Mind a 6 idősort min-max skálázzuk!<br> <i>(Használjuk a scales library rescale függvényét!)</i></p>
+
+```{r label="Min-max scaling for the Open prices"}
+# Min-max scaling for the Open prices
+combined_data_scaled <- combined_data %>%
+  group_by(Type) %>%  # Scaling should be implemented by (company by year)
+  mutate(Scaled_Open = rescale(Open))  # New column for the scaled Open prices
+
+# Checking on the result
+head(combined_data_scaled)
+
+```
+
+### h) DTW számítása
+
+Számoljuk ki és ábrázoljuk egy táblázatban a normalizált idősorok páronkénti DTW távolságát! <i>(Használjuk a dtw csomag dtw függvényét! Készítsünk DataFramet, a sorok és oszlopok nevei is legyenek a megfelelő idősorok nevei, a cellákban pedig a DTW távolságuk szerepeljen. Használj for ciklust! Tárold el a DataFrameket egy listában.)</i>
+
+```{r label="Calculating the DTW distances"}
+# A list that contains vectors of the scaled Open prices by (company and year)
+timeseries_list <- combined_data_scaled %>% 
+  split(.$Type) %>% # Splitting the data by (company and year)
+  lapply(function(df) df$Scaled_Open) # Extracting the scaled Open prices from the current df
+
+# Getting the length of the list
+n <- length(timeseries_list)
+dtw_matrix <- matrix(NA, n, n)  # Creating an NA matrix of the size n x n
+rownames(dtw_matrix) <- names(timeseries_list) # Setting the name of each row in the matrix
+colnames(dtw_matrix) <- names(timeseries_list) # Setting the name of each column in the matrix
+
+# Double for loop to evaluate the DTW distances
+for (i in 1:n) { # Looping rows
+  for (j in i:n) { # Looping columns
+    alignment <- dtw(timeseries_list[[i]], timeseries_list[[j]]) # Storing the results of the DTW() function
+    dtw_matrix[i, j] <- alignment$distance  # Storing the DTW distance
+    dtw_matrix[j, i] <- alignment$distance  # Storing to the symmetric cell 
+  }
+}
+
+# Checking on the results
+nice_table(as.data.frame(dtw_matrix))
+
+```
+
+#### h/1 Szorgalmi feladat
+
+Az adatokat a jobb átláthatóság érdekében szeretném megjeleníteni hőtérkép formájában.<br> Arról jobban leolvavshatóak a "kedvező távolságok" és a "messzi távolságok"
+
+```{r label="Plotting the DTW distances as a heatmap"}
+# Set the upper triangle of the matrix (excluding the diagonal) to NA
+dtw_upper_tri <- dtw_matrix
+dtw_upper_tri[upper.tri(dtw_matrix)] <- NA
+
+# Converting the matrix to a data frame
+data_melted <- as.data.frame.table(dtw_upper_tri)
+
+# Renaming the columns for ggplot
+colnames(data_melted) <- c("Row", "Column", "Value")
+
+# Reversing both the row and column factor levels to match the original dataset order
+data_melted$Row <- factor(data_melted$Row, levels = rev(rownames(dtw_upper_tri)))
+
+# Plotting the heatmap using ggplot, including values inside the tiles
+ggplot(data_melted, aes(x = Column, y = Row, fill = Value)) + 
+  geom_tile(color = "white") + 
+  geom_text(aes(label = ifelse(is.na(Value), "", sprintf("%.0f", Value))),  # Format numbers to 2 decimals
+            color = "black", size = 5, fontface = "bold") +  # Increase font size and make it bold
+  scale_fill_gradient(low = "lightgreen", high = "red", na.value = "white", guide = guide_colorbar(barwidth = 50)) +  # Extend color bar width
+  plotting_theme(2) +
+  theme(axis.title.x = element_blank(),  # Remove x-axis title
+        axis.title.y = element_blank(),  # Remove y-axis title
+        legend.title = element_blank(),
+        legend.position = "bottom") +  # Remove the legend title
+  scale_x_discrete(position = "bottom")  # Position the x labels on the bottom
+```
+
+### i) Összegzés
+
+Mit tapasztalsz? Hasonlítanak-e a különböző években a cégek idősorai? Foglald össze tapasztalataidat 1-2 mondatban. <br> **Válasz:** A DTW távolságok alapján közel állnak egymáshoz az alábbi idősorok:
+<pre>
+- Facebook 2017 | Facebook 2019
+- Facebook 2017 | Twitter 2017
+- Facebook 2019 | Twitter 2017
+</pre><br>
+Összesen 15 párt lehet alkotni az idősorokból. Ezek közül 3 párnál minősíthető a távolság közelinek. Azaz a lehetséges párosítások 20%-ában van valamifajta "hasonlóság" az adatokban.
